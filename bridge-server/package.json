@@ -1,0 +1,21 @@
+{
+  "name": "medtrack-bridge-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Laptop-to-Arduino relay bridge for the MedTrack Smart Medical Dispenser",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "serialport": "^12.0.0",
+    "ws": "^8.18.0"
+  },
+  "allowScripts": {
+    "@serialport/bindings-cpp@12.0.1": true
+  }
+}

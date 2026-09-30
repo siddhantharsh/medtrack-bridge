@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>MedTrack Bridge — Status</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --teal: #028090;
+      --mint: #02c39a;
+      --amber: #e8a33d;
+      --red: #d64545;
+      --ink: #16302f;
+      --bg: #f4faf9;
+      --card: #ffffff;
+      --border: #dcece9;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      padding: 24px;
+    }
+    header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    h1 { margin: 0; font-size: 22px; color: var(--teal); }
+    #conn {
+      font-size: 13px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+    #conn.up { background: #d9f5ec; color: #027a5f; }
+    #conn.down { background: #fbe4e4; color: var(--red); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .card h2 { margin: 0 0 4px; font-size: 16px; }
+    .card .medicine { color: #5a716f; font-size: 13px; margin-bottom: 10px; }
+    .pill {
+      display: inline-block;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      padding: 4px 10px;
+      border-radius: 999px;
+    }
+    .pill.pending { background: #fdf0dc; color: #9a6a1a; }
+    .pill.dispensed { background: #e2f2ff; color: #1b6fa8; }
+    .pill.collected { background: #d9f5ec; color: #027a5f; }
+    .pill.missed { background: #fbe4e4; color: var(--red); }
+    .time { font-size: 12px; color: #8aa0a0; margin-top: 8px; }
+    h3 { color: var(--teal); font-size: 15px; margin-bottom: 8px; }
+    #log {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 8px 16px;
+      max-height: 360px;
+      overflow-y: auto;
+    }
+    .entry {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+    }
+    .entry:last-child { border-bottom: none; }
+    .entry .what { font-weight: 600; }
+    .entry .when { color: #8aa0a0; white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MedTrack Bridge</h1>
+    <span id="conn" class="down">connecting…</span>
+  </header>
+
+  <div id="compartments" class="grid"></div>
+
+  <h3>Live event log</h3>
+  <div id="log"></div>
+
+  <script>
+    const compartmentsEl = document.getElementById("compartments");
+    const logEl = document.getElementById("log");
+    const connEl = document.getElementById("conn");
+
+    let compartments = [];
+    let latestByCompartment = {};
+
+    function pillClass(status) {
+      return status || "pending";
+    }
+
+    function renderCompartments() {
+      compartmentsEl.innerHTML = "";
+      for (const c of compartments) {
+        const event = latestByCompartment[c.id];
+        const status = event ? event.status : "pending";
+        const card = document.createElement("div");
+        card.className = "card";
+        card.innerHTML = `
+          <h2>${c.label}</h2>
+          <div class="medicine">${c.medicineName}</div>
+          <span class="pill ${pillClass(status)}">${status}</span>
+          <div class="time">Scheduled ${c.time}</div>
+        `;
+        compartmentsEl.appendChild(card);
+      }
+    }
+
+    function logEntry(text) {
+      const row = document.createElement("div");
+      row.className = "entry";
+      const now = new Date().toLocaleTimeString();
+      row.innerHTML = `<span class="what">${text}</span><span class="when">${now}</span>`;
+      logEl.prepend(row);
+    }
+
+    async function loadInitial() {
+      const [compartmentsRes, historyRes, statusRes] = await Promise.all([
+        fetch("/api/compartments"),
+        fetch("/api/history"),
+        fetch("/api/status"),
+      ]);
+      compartments = await compartmentsRes.json();
+      const history = await historyRes.json();
+      const status = await statusRes.json();
+
+      for (const event of [...history].reverse()) {
+        latestByCompartment[event.compartmentId] = event;
+      }
+
+      connEl.textContent = status.arduinoConnected ? "Arduino connected" : "Arduino not connected";
+      connEl.className = status.arduinoConnected ? "up" : "down";
+
+      renderCompartments();
+    }
+
+    function labelFor(compartmentId) {
+      const c = compartments.find((x) => x.id === compartmentId);
+      return c ? c.label : `Compartment ${compartmentId}`;
+    }
+
+    function connectSocket() {
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      const ws = new WebSocket(`${proto}//${location.host}`);
+
+      ws.onmessage = (msg) => {
+        const { type, event } = JSON.parse(msg.data);
+        if (event) {
+          latestByCompartment[event.compartmentId] = event;
+          renderCompartments();
+        }
+        logEntry(`${labelFor(event?.compartmentId)} — ${type}`);
+      };
+
+      ws.onclose = () => setTimeout(connectSocket, 2000);
+    }
+
+    loadInitial().then(connectSocket);
+  </script>
+</body>
+</html>
