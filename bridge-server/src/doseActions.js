@@ -2,7 +2,7 @@
 // endpoint and the background scheduler, so the two paths can't drift.
 
 import { store } from "./store.js";
-import { dispense as serialDispense } from "./serial.js";
+import { dispense as serialDispense, collect as serialCollect } from "./serial.js";
 
 const MISSED_TIMEOUT_MS = 2 * 60 * 1000;
 const missedTimers = new Map();
@@ -11,7 +11,10 @@ function todayStr() {
   return new Date().toISOString().slice(0, 10);
 }
 
-export async function dispenseCompartment(compartmentId, broadcast) {
+// manual: true for the "Simulate dispense" button (phone or laptop UI) —
+// the servo opens and stays open until collectDose() is called, rather
+// than auto-closing on a timer. false for the scheduler's real dispenses.
+export async function dispenseCompartment(compartmentId, broadcast, { manual = false } = {}) {
   const compartment = store.getCompartment(compartmentId);
   if (!compartment) {
     throw new Error(`Unknown compartment ${compartmentId}`);
@@ -24,14 +27,21 @@ export async function dispenseCompartment(compartmentId, broadcast) {
     status: "dispensed",
   });
   broadcast({ type: "dispensed", event });
-
-  await serialDispense(compartmentId);
-
-  const doneEvent = store.getEvent(event.id);
-  broadcast({ type: "done", event: doneEvent });
-
   scheduleMissedCheck(event.id, broadcast);
-  return doneEvent;
+
+  await serialDispense(compartmentId, { hold: manual });
+
+  return event;
+}
+
+// Fires when the Arduino reports a servo back at rest — quickly for a
+// timed dispense, or whenever collectDose() closes a held-open one. Purely
+// informational (e.g. drives the laptop UI's beep); doesn't change status.
+export function notifyDone(compartmentId, broadcast) {
+  const event = store.findLatestDispensedToday(compartmentId, todayStr());
+  if (event) {
+    broadcast({ type: "done", event });
+  }
 }
 
 function scheduleMissedCheck(eventId, broadcast) {
@@ -66,5 +76,10 @@ export function collectDose(compartmentId, broadcast) {
 
   const updated = store.updateDoseEvent(event.id, { status: "collected" });
   broadcast({ type: "collected", event: updated });
+
+  // No-op on the Arduino side if that compartment wasn't actually held
+  // open (e.g. a timed dispense that already closed itself).
+  serialCollect(compartmentId);
+
   return updated;
 }

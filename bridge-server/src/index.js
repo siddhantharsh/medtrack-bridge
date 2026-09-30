@@ -4,11 +4,12 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { connectArduino, isConnected } from "./serial.js";
+import { connectArduino, isConnected, onDone } from "./serial.js";
 import { createBroadcastHub } from "./ws.js";
-import { createRouter } from "./routes.js";
+import { createRouter, localIp } from "./routes.js";
 import { startScheduler } from "./scheduler.js";
 import { store } from "./store.js";
+import { notifyDone } from "./doseActions.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -23,7 +24,7 @@ app.use(express.static(path.join(__dirname, "..", "public")));
 const server = http.createServer(app);
 const broadcast = createBroadcastHub(server);
 
-app.use(createRouter(broadcast));
+app.use(createRouter(broadcast, { port: PORT }));
 
 async function main() {
   if (store.getCompartments().length === 0) {
@@ -44,12 +45,17 @@ async function main() {
     );
   }
 
+  onDone((compartmentId) => notifyDone(compartmentId, broadcast));
+
   await connectArduino({ configuredPath: ARDUINO_PORT, baudRate: ARDUINO_BAUD });
   startScheduler(broadcast);
 
   server.listen(PORT, () => {
+    const ip = localIp();
     console.log(`[Bridge] Listening on http://0.0.0.0:${PORT}`);
-    console.log(`[Bridge] Status page: http://<laptop-ip>:${PORT}/`);
+    console.log(
+      `[Bridge] Status page: ${ip ? `http://${ip}:${PORT}/` : `http://<laptop-ip>:${PORT}/`}`,
+    );
     console.log(
       `[Bridge] Arduino: ${isConnected() ? "connected" : "not connected yet"}`,
     );

@@ -40,6 +40,17 @@
     }
     #conn.up { background: #d9f5ec; color: #027a5f; }
     #conn.down { background: #fbe4e4; color: var(--red); }
+    #connect-info {
+      width: 100%;
+      font-size: 13px;
+      color: #5a716f;
+    }
+    #connect-info strong {
+      color: var(--teal);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 14px;
+      user-select: all;
+    }
     .grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -68,6 +79,30 @@
     .pill.collected { background: #d9f5ec; color: #027a5f; }
     .pill.missed { background: #fbe4e4; color: var(--red); }
     .time { font-size: 12px; color: #8aa0a0; margin-top: 8px; }
+    .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    button {
+      font: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--teal);
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+    button:hover { background: #eefaf8; }
+    button.primary { background: var(--mint); color: #fff; border-color: var(--mint); }
+    button.primary:hover { background: #02b28c; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    .schedule-row { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+    .schedule-row input[type="time"] {
+      font: inherit;
+      font-size: 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 6px;
+    }
     h3 { color: var(--teal); font-size: 15px; margin-bottom: 8px; }
     #log {
       background: var(--card);
@@ -94,6 +129,7 @@
   <header>
     <h1>MedTrack Bridge</h1>
     <span id="conn" class="down">connecting…</span>
+    <div id="connect-info">Connect your phone to: <strong id="connect-addr">—</strong></div>
   </header>
 
   <div id="compartments" class="grid"></div>
@@ -125,10 +161,104 @@
           <div class="medicine">${c.medicineName}</div>
           <span class="pill ${pillClass(status)}">${status}</span>
           <div class="time">Scheduled ${c.time}</div>
+          <div class="schedule-row">
+            <input type="time" data-time-for="${c.id}" value="${c.time}" />
+            <button data-action="save-time" data-id="${c.id}">Save time</button>
+          </div>
+          <div class="actions">
+            <button class="primary" data-action="dispense" data-id="${c.id}">Simulate dispense</button>
+            <button data-action="collect" data-id="${c.id}" ${status !== "dispensed" ? "disabled" : ""}>Mark collected</button>
+          </div>
         `;
         compartmentsEl.appendChild(card);
       }
     }
+
+    async function postJson(path, body) {
+      const res = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Request failed");
+      return data;
+    }
+
+    compartmentsEl.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-action]");
+      if (!btn) return;
+      const id = Number(btn.dataset.id);
+      const action = btn.dataset.action;
+
+      if (action === "save-time") {
+        const input = compartmentsEl.querySelector(`input[data-time-for="${id}"]`);
+        const c = compartments.find((x) => x.id === id);
+        try {
+          await postJson("/api/compartments", { ...c, time: input.value });
+          logEntry(`${labelFor(id)} — schedule updated to ${input.value}`);
+          await loadCompartments();
+        } catch (err) {
+          logEntry(`${labelFor(id)} — failed to save time: ${err.message}`);
+        }
+        return;
+      }
+
+      if (action === "dispense") {
+        btn.disabled = true;
+        try {
+          await postJson("/api/dispense", { compartmentId: id });
+        } catch (err) {
+          logEntry(`${labelFor(id)} — dispense failed: ${err.message}`);
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
+
+      if (action === "collect") {
+        btn.disabled = true;
+        try {
+          await postJson("/api/collect", { compartmentId: id });
+        } catch (err) {
+          logEntry(`${labelFor(id)} — collect failed: ${err.message}`);
+          btn.disabled = false;
+        }
+        return;
+      }
+    });
+
+    async function loadCompartments() {
+      compartments = await (await fetch("/api/compartments")).json();
+      renderCompartments();
+    }
+
+    // A beep needs a user gesture to unlock on most browsers; any click
+    // on the page (e.g. a button above) satisfies that.
+    let audioCtx = null;
+    function beep() {
+      try {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.frequency.value = 880;
+        gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.4);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.4);
+      } catch (err) {
+        // Autoplay-blocked or unsupported — non-fatal, page still works.
+      }
+    }
+    document.addEventListener(
+      "click",
+      () => {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      },
+      { once: true },
+    );
 
     function logEntry(text) {
       const row = document.createElement("div");
@@ -155,6 +285,11 @@
       connEl.textContent = status.arduinoConnected ? "Arduino connected" : "Arduino not connected";
       connEl.className = status.arduinoConnected ? "up" : "down";
 
+      const addrEl = document.getElementById("connect-addr");
+      addrEl.textContent = status.localIp
+        ? `${status.localIp}:${status.port}`
+        : "IP not found — check WiFi connection";
+
       renderCompartments();
     }
 
@@ -168,12 +303,24 @@
       const ws = new WebSocket(`${proto}//${location.host}`);
 
       ws.onmessage = (msg) => {
-        const { type, event } = JSON.parse(msg.data);
+        const data = JSON.parse(msg.data);
+        const { type, event } = data;
+
+        if (type === "compartments-updated") {
+          compartments = data.compartments;
+          renderCompartments();
+          logEntry("Schedule updated");
+          return;
+        }
+
         if (event) {
           latestByCompartment[event.compartmentId] = event;
           renderCompartments();
         }
         logEntry(`${labelFor(event?.compartmentId)} — ${type}`);
+        if (type === "done" || type === "collected") {
+          beep();
+        }
       };
 
       ws.onclose = () => setTimeout(connectSocket, 2000);

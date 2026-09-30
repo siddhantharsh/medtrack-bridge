@@ -1,6 +1,6 @@
 // USB serial link to the Arduino. Handles auto-detecting the port,
-// logging connection status, and matching outgoing "DISPENSE <id>"
-// commands to the Arduino's ACK/DONE replies.
+// logging connection status, and matching outgoing dispense commands to
+// the Arduino's ACK/DONE replies.
 
 import { SerialPort, ReadlineParser } from "serialport";
 
@@ -9,12 +9,13 @@ import { SerialPort, ReadlineParser } from "serialport";
 // during that window is silently swallowed — observed as the first command
 // sent right after 'open' never getting a reply. Wait this long, then send
 // a harmless warm-up line (ignored by the sketch, since it isn't a valid
-// DISPENSE command) to absorb that loss before accepting real commands.
+// command) to absorb that loss before accepting real commands.
 const BOOT_SETTLE_MS = 2500;
 
 let port = null;
 let ready = false;
-let pending = null; // { compartmentId, resolve, reject, timer, onAck }
+let pending = null; // { compartmentId, resolve, timer }
+let doneHandler = null; // (compartmentId) => void, set via onDone()
 
 export async function connectArduino({ configuredPath, baudRate }) {
   const targetPath = configuredPath || (await autoDetectPort());
@@ -72,7 +73,8 @@ function handleLine(rawLine) {
     const id = Number(line.slice("ACK DISPENSE ".length));
     console.log(`[Arduino] DISPENSE ${id} acknowledged`);
     if (pending && pending.compartmentId === id) {
-      pending.onAck?.();
+      pending.resolve();
+      pending = null;
     }
     return;
   }
@@ -80,22 +82,28 @@ function handleLine(rawLine) {
   if (line.startsWith("DONE DISPENSE ")) {
     const id = Number(line.slice("DONE DISPENSE ".length));
     console.log(`[Arduino] DISPENSE ${id} complete`);
-    if (pending && pending.compartmentId === id) {
-      clearTimeout(pending.timer);
-      pending.resolve();
-      pending = null;
-    }
+    doneHandler?.(id);
     return;
   }
 
   console.log(`[Arduino] ${line}`);
 }
 
-// Sends "DISPENSE <compartmentId>" and resolves once the Arduino's DONE
-// reply for that id comes back (or rejects on timeout / disconnect).
+// Registers a callback fired whenever the Arduino reports a compartment's
+// servo is back at rest — for a timed dispense this follows quickly; for a
+// manual-test dispense (see dispense()'s `hold` option) it only fires once
+// collect() is called, which could be much later.
+export function onDone(handler) {
+  doneHandler = handler;
+}
+
+// Sends a dispense command and resolves once the Arduino's ACK for that id
+// comes back (or rejects on timeout / disconnect). Physical completion
+// (DONE) arrives later and asynchronously — see onDone() — since a
+// manual-test dispense holds open indefinitely until collect() is called.
 // Only one dispense can be in flight at a time, matching the Arduino's
 // single-threaded loop.
-export function dispense(compartmentId, { onAck, timeoutMs = 8000 } = {}) {
+export function dispense(compartmentId, { hold = false, timeoutMs = 5000 } = {}) {
   if (!port || !port.isOpen) {
     return Promise.reject(new Error("Arduino is not connected"));
   }
@@ -110,30 +118,53 @@ export function dispense(compartmentId, { onAck, timeoutMs = 8000 } = {}) {
     );
   }
 
+  const command = hold ? "TESTDISPENSE" : "DISPENSE";
+
   return new Promise((resolve, reject) => {
+    // This native serialport binding doesn't reliably deliver 'data'
+    // events on its own on this system — buffered replies only surface
+    // once another write happens (confirmed via direct testing: a stuck
+    // read only flushes right after a subsequent port.write()). Nudge
+    // with a harmless newline periodically so the ACK gets delivered
+    // promptly instead of sitting buffered until something else pokes it.
+    const nudge = setInterval(() => port.write("\n"), 250);
+
     pending = {
       compartmentId,
-      onAck,
-      resolve,
-      reject,
+      resolve: () => {
+        clearInterval(nudge);
+        clearTimeout(pending.timer);
+        resolve();
+      },
       timer: setTimeout(() => {
+        clearInterval(nudge);
         pending = null;
         reject(
           new Error(
-            `Timed out waiting for Arduino response to DISPENSE ${compartmentId}`,
+            `Timed out waiting for Arduino response to ${command} ${compartmentId}`,
           ),
         );
       }, timeoutMs),
     };
 
-    port.write(`DISPENSE ${compartmentId}\n`, (err) => {
+    port.write(`${command} ${compartmentId}\n`, (err) => {
       if (err) {
+        clearInterval(nudge);
         clearTimeout(pending.timer);
         pending = null;
         reject(err);
       }
     });
   });
+}
+
+// Closes a compartment left open by a manual-test dispense. Best-effort:
+// if the Arduino isn't connected, the DB-side collect still succeeds, it
+// just won't physically close until it reconnects.
+export function collect(compartmentId) {
+  if (port && port.isOpen) {
+    port.write(`COLLECT ${compartmentId}\n`);
+  }
 }
 
 export function isConnected() {

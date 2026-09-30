@@ -152,6 +152,18 @@ class RemoteDoseRepository extends DoseRepository {
       _channel!.stream.listen(
         (raw) {
           final message = jsonDecode(raw as String) as Map<String, dynamic>;
+
+          if (message['type'] == 'compartments-updated') {
+            final list = message['compartments'] as List;
+            _compartments
+              ..clear()
+              ..addAll(
+                list.map((e) => Compartment.fromJson(e as Map<String, dynamic>)),
+              );
+            notifyListeners();
+            return;
+          }
+
           final eventJson = message['event'];
           if (eventJson != null) {
             _applyEvent(DoseEvent.fromJson(eventJson as Map<String, dynamic>));
