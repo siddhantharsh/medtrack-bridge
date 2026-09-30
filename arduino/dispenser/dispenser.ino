@@ -20,7 +20,7 @@ const uint8_t ANGLE_REST = 0;
 const uint8_t ANGLE_OPEN = 90;
 const uint16_t OPEN_HOLD_MS = 1200;
 
-const uint8_t SERIAL_BAUD = 115200;
+const uint32_t SERIAL_BAUD = 115200;
 // Longest valid command ("DISPENSE 1") is well under this; caps how much
 // we'll buffer before giving up on a line, so noise on the line can't
 // grow the buffer forever.

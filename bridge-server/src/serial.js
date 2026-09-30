@@ -4,7 +4,16 @@
 
 import { SerialPort, ReadlineParser } from "serialport";
 
+// Opening the serial port resets the Arduino (DTR toggle), and the board's
+// bootloader/UART needs a moment to settle afterward. Any byte written
+// during that window is silently swallowed — observed as the first command
+// sent right after 'open' never getting a reply. Wait this long, then send
+// a harmless warm-up line (ignored by the sketch, since it isn't a valid
+// DISPENSE command) to absorb that loss before accepting real commands.
+const BOOT_SETTLE_MS = 2500;
+
 let port = null;
+let ready = false;
 let pending = null; // { compartmentId, resolve, reject, timer, onAck }
 
 export async function connectArduino({ configuredPath, baudRate }) {
@@ -21,7 +30,13 @@ export async function connectArduino({ configuredPath, baudRate }) {
   const parser = port.pipe(new ReadlineParser({ delimiter: "\n" }));
 
   port.on("open", () => {
-    console.log(`[Arduino] Connected on ${targetPath}`);
+    console.log(`[Arduino] Port opened on ${targetPath}, waiting for board to reset...`);
+    setTimeout(() => {
+      port.write("\n", () => {
+        ready = true;
+        console.log(`[Arduino] Connected on ${targetPath}`);
+      });
+    }, BOOT_SETTLE_MS);
   });
 
   port.on("error", (err) => {
@@ -29,6 +44,7 @@ export async function connectArduino({ configuredPath, baudRate }) {
   });
 
   port.on("close", () => {
+    ready = false;
     console.log("[Arduino] Serial port closed");
   });
 
@@ -79,9 +95,14 @@ function handleLine(rawLine) {
 // reply for that id comes back (or rejects on timeout / disconnect).
 // Only one dispense can be in flight at a time, matching the Arduino's
 // single-threaded loop.
-export function dispense(compartmentId, { onAck, timeoutMs = 5000 } = {}) {
+export function dispense(compartmentId, { onAck, timeoutMs = 8000 } = {}) {
   if (!port || !port.isOpen) {
     return Promise.reject(new Error("Arduino is not connected"));
+  }
+  if (!ready) {
+    return Promise.reject(
+      new Error("Arduino is still resetting after connecting, try again in a couple seconds"),
+    );
   }
   if (pending) {
     return Promise.reject(
@@ -116,5 +137,5 @@ export function dispense(compartmentId, { onAck, timeoutMs = 5000 } = {}) {
 }
 
 export function isConnected() {
-  return Boolean(port && port.isOpen);
+  return Boolean(port && port.isOpen && ready);
 }
